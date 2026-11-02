@@ -1,0 +1,27 @@
+{
+  "name": "codex-sdk",
+  "version": "1.0.0",
+  "description": "A coding agent powered by the Codex SDK and Daytona sandboxes.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "codex",
+    "sandbox",
+    "typescript",
+    "daytona"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@daytona/sdk": "0.227.0",
+    "dotenv": "18.0.9"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  }
+}
