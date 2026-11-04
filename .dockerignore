@@ -1,0 +1,13 @@
+.git
+.env
+dist
+node_modules
+outputs
+*.log
+
+# The controller itself is not required by the worker image.
+src
+
+# Keep the Docker build context limited to the pinned in-sandbox agent and
+# worker helper files.
+knowledge

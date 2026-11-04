@@ -1,0 +1,155 @@
+# syntax=docker/dockerfile:1.7
+
+# Go is copied from the official image so candidate repositories can use Go
+# without making it the base distribution for the rest of the worker.
+FROM golang:1.24-bookworm AS go-toolchain
+
+FROM node:24-bookworm AS toolchain
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG UV_VERSION=0.12.23
+ARG RUST_TOOLCHAIN=stable
+ARG KEYRING_VERSION=25.7.0
+ARG GOOGLE_ARTIFACT_KEYRING_VERSION=1.1.2
+ARG GOOGLE_API_PYTHON_CLIENT_VERSION=2.201.0
+ARG GOOGLE_AUTH_VERSION=2.62.0
+
+ENV CI=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    UV_TOOL_DIR=/opt/uv-tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin \
+    PATH=/opt/cargo/bin:/usr/local/go/bin:/opt/drive-uploader/bin:$PATH \
+    M1_BUILD_JOBS=2 \
+    CARGO_BUILD_JOBS=2 \
+    GOMAXPROCS=2 \
+    MAKEFLAGS=-j2
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        apt-transport-https \
+        bash \
+        build-essential \
+        ca-certificates \
+        clang \
+        cmake \
+        curl \
+        file \
+        git \
+        git-lfs \
+        gnupg \
+        jq \
+        libclang-dev \
+        libssl-dev \
+        lld \
+        llvm \
+        make \
+        ninja-build \
+        openssh-client \
+        patch \
+        pkg-config \
+        protobuf-compiler \
+        python3 \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        rsync \
+        tar \
+        unzip \
+        wget \
+        xz-utils \
+        zip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker Engine is required because rv/Harbor build and run verifier images.
+# Daytona starts dockerd when it detects the daemon in the sandbox image.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && printf '%s\n' \
+        'Types: deb' \
+        'URIs: https://download.docker.com/linux/debian' \
+        'Suites: bookworm' \
+        'Components: stable' \
+        "Architectures: $(dpkg --print-architecture)" \
+        'Signed-By: /etc/apt/keyrings/docker.asc' \
+        > /etc/apt/sources.list.d/docker.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-ce \
+        docker-ce-cli \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/docker/* /var/lib/containerd/*
+
+# Keep gcloud available for private Artifact Registry troubleshooting and
+# explicitly authorized rv updates. No gcloud credentials are stored here.
+RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && printf '%s\n' \
+        'deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main' \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+
+RUN python3 -m pip install --break-system-packages --no-cache-dir "uv==${UV_VERSION}" \
+    && uv python install 3.14 \
+    && uv tool install "keyring==${KEYRING_VERSION}" \
+        --with "keyrings.google-artifactregistry-auth==${GOOGLE_ARTIFACT_KEYRING_VERSION}" \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+            --component rustfmt,clippy
+
+# Isolated Python environment used only by the final Google Drive uploader.
+RUN uv venv --python python3 /opt/drive-uploader \
+    && uv pip install --python /opt/drive-uploader/bin/python \
+        "google-api-python-client==${GOOGLE_API_PYTHON_CLIENT_VERSION}" \
+        "google-auth==${GOOGLE_AUTH_VERSION}"
+
+WORKDIR /opt/cyberswe-agent
+COPY agent/package.json agent/package-lock.json ./
+RUN npm ci --omit=dev \
+    && ln -s /opt/cyberswe-agent/node_modules/.bin/codex /usr/local/bin/codex \
+    && codex --version
+COPY agent/index.ts ./index.ts
+
+COPY docker/upload_task_to_drive.py /usr/local/libexec/upload_task_to_drive.py
+RUN chmod 0755 /usr/local/libexec/upload_task_to_drive.py \
+    && ln -s /usr/local/libexec/upload_task_to_drive.py /usr/local/bin/upload-task-to-drive \
+    && mkdir -p /home/daytona/input /home/daytona/workspace /output
+
+# This stage can be built without private registry access to smoke-test the
+# language toolchains, Docker presence, Codex CLI, and Drive uploader.
+FROM toolchain AS worker-base
+
+# The default final image includes the private realm-verifier package. Build it
+# with a short-lived token, for example:
+#   gcloud auth print-access-token > /tmp/rv-token
+#   docker build --secret id=artifact_registry_token,src=/tmp/rv-token \
+#     -f Dockerfile.cyberswe -t cyberswe-worker:dev .
+FROM worker-base AS worker
+
+ARG RV_VERSION=0.0.151
+ARG RV_INDEX_HOST=us-central1-python.pkg.dev
+ARG RV_INDEX_PATH=m1-rl-envs/rv-coding/simple
+
+RUN --mount=type=secret,id=artifact_registry_token,required=true \
+    token="$(cat /run/secrets/artifact_registry_token)" \
+    && private_index="https://oauth2accesstoken:${token}@${RV_INDEX_HOST}/${RV_INDEX_PATH}/" \
+    && uv tool install --python 3.14 --index "${private_index}" "realm-verifier==${RV_VERSION}" \
+    && rv --version
+
+WORKDIR /home/daytona/workspace
+
+# Daytona's Docker-enabled sandboxes need the daemon running inside the
+# container. Keeping dockerd in the foreground also keeps the sandbox alive.
+ENTRYPOINT ["/usr/bin/dockerd"]

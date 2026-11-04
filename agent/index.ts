@@ -7,6 +7,7 @@
 // This script is uploaded to the sandbox and invoked with PROMPT in the environment.
 
 import { Codex, Thread } from '@openai/codex-sdk'
+import { appendFile } from 'node:fs/promises'
 import type {
   ThreadOptions,
   ThreadItem,
@@ -19,7 +20,19 @@ import type {
   AgentMessageItem,
   Usage,
 } from '@openai/codex-sdk'
-import fs from 'fs/promises'
+
+const FAILURE_EVENT_LOG =
+  process.env.CODEX_FAILURE_EVENT_LOG ?? '/home/daytona/workspace/codex-worker-failures.jsonl'
+
+async function persistFailureEvent(event: unknown): Promise<void> {
+  const record = JSON.stringify({ timestamp: new Date().toISOString(), event })
+  try {
+    await appendFile(FAILURE_EVENT_LOG, `${record}\n`, { encoding: 'utf8', mode: 0o600 })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`Failed to persist Codex failure event to ${FAILURE_EVENT_LOG}: ${message}`)
+  }
+}
 
 // Convert output from the agent to a printable string
 function toolCallToString(item: ThreadItem): string {
@@ -51,35 +64,50 @@ function toolCallToString(item: ThreadItem): string {
   return ''
 }
 
-// Read a file if it exists, or return undefined
-async function readFileIfExisting(path: string): Promise<string | undefined> {
-  return fs.readFile(path, 'utf8').catch(() => undefined)
-}
-
 async function main(): Promise<void> {
-  // Get the OpenAI API key from environment variables
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    console.error('Error: OpenAI API key not provided in sandbox environment')
+  const prompt = process.env.PROMPT?.trim()
+  if (!prompt) {
+    console.error('Error: PROMPT not provided')
     process.exit(1)
   }
 
-  // Initialize the Codex SDK
-  // Using an empty environment object prevents environment variables from being passed to the agent
-  const codex = new Codex({ apiKey, env: {} })
-  const threadIdPath = '/tmp/codex-thread-id'
-  const threadId = (await readFileIfExisting(threadIdPath))?.trim()
+  const supportedReasoningEfforts = new Set([
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+    'ultra',
+    'persistent',
+  ])
+  const reasoningEffort = process.env.CODEX_REASONING_EFFORT ?? 'high'
+  if (!supportedReasoningEfforts.has(reasoningEffort)) {
+    console.error(`Error: unsupported CODEX_REASONING_EFFORT: ${reasoningEffort}`)
+    process.exit(1)
+  }
 
-  // Configure Codex options
+  // Authentication is established in this disposable sandbox with
+  // `codex login --device-auth` before the launcher starts. No API key is passed.
+  const codex = new Codex()
+
+  // Configure one autonomous task-building turn.
   const options: ThreadOptions = {
-    workingDirectory: '/home/daytona',
+    model: process.env.CODEX_MODEL ?? 'gpt-5.6-sol',
+    modelReasoningEffort: reasoningEffort as NonNullable<ThreadOptions['modelReasoningEffort']>,
+    workingDirectory: '/home/daytona/workspace',
     skipGitRepoCheck: true,
     sandboxMode: 'danger-full-access',
+    approvalPolicy: 'never',
+    networkAccessEnabled: true,
+    webSearchMode: 'live',
   }
-  const thread: Thread = threadId ? codex.resumeThread(threadId, options) : codex.startThread(options)
+  const thread: Thread = codex.startThread(options)
 
   // Run the Codex agent and stream the output
-  const { events } = await thread.runStreamed(process.env.PROMPT ?? '')
+  const { events } = await thread.runStreamed(prompt, {
+    cyberAccessProgram: 'daybreak_blue',
+  })
   for await (const event of events) {
     if (event.type === 'item.completed') {
       // Print each completed item
@@ -89,12 +117,13 @@ async function main(): Promise<void> {
       // Print usage summary when the agent is finished
       const { cached_input_tokens, input_tokens, output_tokens } = event.usage as Usage
       console.log(`*Usage Summary: Cached: ${cached_input_tokens}, Input: ${input_tokens}, Output: ${output_tokens}*`)
+    } else if (event.type === 'turn.failed') {
+      console.error(`Codex turn failed: ${event.error.message}`)
+      await persistFailureEvent(event)
+    } else if (event.type === 'error') {
+      console.error(`Codex stream error: ${event.message}`)
+      await persistFailureEvent(event)
     }
-  }
-  
-  // Save the thread ID for future runs
-  if (!threadId && thread.id) {
-    await fs.writeFile(threadIdPath, thread.id, 'utf8')
   }
 }
 
