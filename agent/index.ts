@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     'ultra',
     'persistent',
   ])
-  const reasoningEffort = process.env.CODEX_REASONING_EFFORT ?? 'high'
+  const reasoningEffort = process.env.CODEX_REASONING_EFFORT ?? 'medium'
   if (!supportedReasoningEfforts.has(reasoningEffort)) {
     console.error(`Error: unsupported CODEX_REASONING_EFFORT: ${reasoningEffort}`)
     process.exit(1)

@@ -37,11 +37,16 @@ files, handoff notes, reports, and final status messages. Do not switch language
 repository, advisory, source comments, documentation, or tool output unless `JOB.md` explicitly
 requires a non-English artifact.
 
-Keep progress updates concise and framed as defensive local regression work. Do not narrate
-step-by-step exploitation, credential abuse, or weaponization in routine commentary when a
-short statement of the security property and validation result is enough. Hidden tests,
-technical task files, and factual handoff notes may still contain the precise detail required to
-reproduce the vulnerability, reject incomplete fixes, and explain the result to the human author.
+Do not emit voluntary routine progress narration. Work through ordinary inspection, edits,
+builds, waits, and successful commands without announcing the next step or restating what a tool
+just did. Subject to higher-priority platform requirements, send a progress message only for a
+material technical finding, an actual blocker requiring attention, or the final outcome. Never
+narrate repeated waiting or polling. When an update is required, keep it to one or two concise
+sentences framed as defensive local regression work. Do not narrate step-by-step exploitation,
+credential abuse, or weaponization when a short statement of the security property and validation
+result is enough. Hidden tests, technical task files, and factual handoff notes may still contain
+the precise detail required to reproduce the vulnerability, reject incomplete fixes, and explain
+the result to the human author.
 
 ## Mission
 
@@ -169,18 +174,52 @@ seeded bug.
 3. Verify the repository license is accepted by Realm and keep the root license file.
 4. Clone or check out the vulnerable source into `environment/repo/` with enough readable
    upstream history for Realm's repository-history checks, but do not fetch the entire
-   upstream object graph by default. Prefer a bounded, filtered checkout:
+   upstream object graph by default. Prefer the smallest bounded ordinary checkout that supplies
+   at least ten reachable commits. Start shallow and deepen only when necessary:
    ```bash
    git init environment/repo
    git -C environment/repo remote add origin <upstream-url>
-   git -C environment/repo fetch --depth=100 --filter=blob:none origin <base-commit>
+   git -C environment/repo fetch --depth=12 origin <base-commit>
    git -C environment/repo checkout --detach FETCH_HEAD
    git -C environment/repo gc --prune=now
    ```
    If the host will not fetch the commit by object ID, fetch only the branch or tag containing
    it, still with bounded depth. Do not fetch all branches, tags, pull-request refs, or a full
-   history merely for convenience. Verify that `git rev-list --count HEAD` reports at least ten
-   genuine readable commits. Preserve this bounded `.git` directory in the task source.
+   history merely for convenience. Do **not** use `--filter=blob:none` or another partial-clone
+   filter for the submitted vendored repository: archive/config sanitization can leave a format-1
+   partial repository unreadable, after which Git silently walks up to the task scaffold and Realm
+   sees its single `rv scaffold` commit instead of upstream history.
+
+   Verify the nested repository directly rather than allowing Git to fall back to the parent task
+   repository. Resolve `environment/repo/`, then use its explicit Git directory and work tree:
+   ```bash
+   repo_root="$(realpath environment/repo)"
+   git --git-dir="$repo_root/.git" --work-tree="$repo_root" rev-parse HEAD
+   git --git-dir="$repo_root/.git" --work-tree="$repo_root" rev-list --count HEAD
+   git --git-dir="$repo_root/.git" --work-tree="$repo_root" fsck --connectivity-only
+   du -sh "$repo_root/.git"
+   ```
+   Require at least ten genuine readable commits and confirm the checked-out vulnerable commit is
+   present in that nested history. If the count is below ten, deepen in small increments rather
+   than replacing it with a full clone. Merge-heavy history may expose far more reachable commits
+   than the requested depth; that is acceptable and does not justify fetching more.
+
+   Keep only the refs and shallow history needed for the vulnerable base. Delete unnecessary
+   remote branches, tags, reflogs, and unreachable objects, then run `git gc --prune=now`. A
+   typical bounded `.git` should be tens of MiB or less. Investigate anything above 50 MiB for an
+   accidental full history or unnecessary refs, and never knowingly ship a vendored `.git` above
+   Realm's 200 MiB large-history warning threshold. Do not sacrifice the exact base commit or the
+   ten-commit minimum merely to meet a preferred size. After the final garbage collection, create
+   one ordinary loose local ref so archive tools cannot drop the otherwise-empty `.git/refs`
+   hierarchy:
+   ```bash
+   git -C environment/repo update-ref refs/heads/rv-base HEAD
+   test -f environment/repo/.git/refs/heads/rv-base
+   ```
+   Do not run `git pack-refs` or another `git gc` after creating this archive-survival ref. A
+   detached `HEAD` plus only packed objects is not enough: if an archive omits the empty `refs/`
+   directories, Git rejects the extracted `.git` directory as not being a repository. Preserve
+   the resulting bounded `.git` directory in the task source.
 5. Record the upstream repository, exact base commit, affected release, fix source, and
    license briefly in `reasoning-notes.md`.
 6. Run the repository's relevant original tests before adding the security tests.
@@ -309,12 +348,22 @@ Select existing tests that cover:
 - successful and ordinary failure paths; and
 - broader repository behavior sufficient to catch a patch that disables or guts the module.
 
-Realm requires at least 15 meaningful regression IDs; 100 is an aspirational target, not a
-reason to manufacture work. Select the smallest meaningful regression net that protects the
-changed public behavior. Prefer already-separate integration and package tests. Do not relocate
-large inline test modules, copy large files, or add unrelated tests merely to reach 100 IDs.
-Widen coverage only when the gold patch changes a central execution path or concrete evidence
-shows that the current regression boundary is too narrow.
+Realm requires at least 15 meaningful regression IDs as an absolute floor and actively targets
+100. Treat 100 as the normal submission target, not as an optional aspiration. Before accepting
+fewer, inventory the runnable existing tests in the affected package, adjacent packages, public
+entry-point integrations, and ordinary repository smoke/regression suites. Widen `test_cmd` and
+list the exact parsed IDs for meaningful tests that protect behavior a plausible repair could
+break. Prefer already-separate integration and package tests. Do not add irrelevant padding or
+protect agent-editable production files merely to increase the number.
+
+If fewer than 100 meaningful runnable IDs genuinely exist, run every suitable available test and
+document the shortfall under both `cyberswe/pass-to-pass-target` and, when applicable,
+`cyberswe/pass-to-pass-thin`. The justification must state the repository's actual test count,
+which suites were examined, how many suitable IDs are already graded, and the concrete reason
+each remaining group cannot fairly run or be protected. Never call these checks stale or dismiss
+them merely because 15 passed. A successful `rv submit` can mean a justification was accepted;
+it does not mean a reviewer will consider a 15--49-test net broad enough. Surface the shortfall in
+the handoff so the human can decide whether it is defensible before spending rollout credits.
 
 Finalize the graded F2P/P2P set and protected-file layout before the first oracle run. At that
 point every listed ID must be exact and parsed, every graded file must be protected, and every
@@ -547,12 +596,66 @@ The Daytona worker has a 10 GiB writable filesystem. Keep it below 90% utilizati
 Do not make source-code changes solely to work around worker resource limits. Prefer test
 command serialization, build flags, or Docker environment settings.
 
-Before the first compilation, configure task-external build and dependency caches and reuse
-them across the pristine base, gold scratch tree, and candidate worktrees. For Rust, set one
-absolute `CARGO_TARGET_DIR` outside the task directory; for Go, reuse external build/module
-caches; for Node and other ecosystems, reuse the package manager's download and compiler caches.
-Do not put these caches in the task archive or expose host-specific cache paths through verifier
-configuration.
+### Resource-aware heavy-task mode
+
+The worker sandbox has an 8 GiB memory limit, which is representative of the verifier budget the
+task must survive later. Measure the cgroup or process peak once after the first execution of the
+**final intended verifier target**, at a natural stage boundary; do not poll memory continuously.
+Enter heavy-task mode if any of these occurs:
+
+- the focused verifier build or test reaches at least 75% of `memory.max` (about 6 GiB in the
+  standard worker);
+- `memory.events` records an OOM/OOM kill; or
+- a compiler or linker is killed for memory.
+
+First distinguish two different causes. Several simultaneous compiler/verifier/probe processes
+near the limit are a **concurrency problem** and require serialization. One compiler or linker
+process near the limit is a **test-target problem** and requires a smaller target; merely setting
+the job count to one does not solve it.
+
+The exact final `test_cmd` must complete comfortably inside the limit in one isolated verifier.
+For a single-target Rust memory failure, prefer, in order:
+
+1. put the hidden exploit in an external integration-test target that uses the real public API;
+   this avoids compiling every inline `#[cfg(test)]` module in a monolithic `--lib` target;
+2. test through the smaller crate that owns the public security boundary, if that remains a real
+   public-surface/sink test rather than a private-helper test;
+3. split independent protocol or feature variants into serialized commands with the narrowest
+   required feature set; and
+4. abandon the candidate if reaching the real public sink inherently needs a verifier target that
+   cannot fit. Never expose private internals or weaken the security assertion just to save RAM.
+
+For heavy Rust tasks, a single resource-safe retry may use `CARGO_BUILD_JOBS=1`,
+`CARGO_INCREMENTAL=0`, disabled dev/test debug info, and an available lower-memory linker such as
+`lld`. Apply these only after identifying the measured bottleneck; a linker change does not repair
+a `rustc` process that alone consumes the limit. Other ecosystems should use equivalent
+single-worker and low-debug settings.
+
+In heavy-task mode:
+
+- run package/test targets serially;
+- run required dynamic Realm checks one at a time rather than allowing nop/oracle verifier jobs
+  to overlap;
+- run the three initial probe categories sequentially rather than together;
+- keep compilation caches and prewarmed evaluator-image layers so serialization does not cause
+  repeated cold builds; and
+- retain the same probe-retry limits used by normal mode.
+
+Normal tasks remain parallel. Heavy-task mode is a measured exception, not a default that slows
+every draft.
+
+Before the first compilation, configure task-external dependency-download caches and reuse them
+where that is safe. Do not blindly share mutable compiler outputs between the pristine base, gold
+scratch tree, and candidate worktrees: stale artifacts can make one source state appear to have
+executed another state's code. For Rust, share `CARGO_HOME` but prefer a distinct absolute
+`CARGO_TARGET_DIR` for each source state. If disk limits require one Rust target directory, switch
+states sequentially and narrowly invalidate the changed workspace packages and test binaries
+before trusting the next result; never trust a base/gold result when Cargo did not rebuild the
+changed crate. For Go, shared content-addressed module/build caches are acceptable, but keep
+generated binaries and workspace outputs state-local. For Node and other ecosystems, share the
+package manager's download cache while keeping installed dependencies and build outputs local to
+the source state. Do not put these caches in the task archive or expose host-specific cache paths
+through verifier configuration.
 
 Never run `cargo clean` or the ecosystem's equivalent as routine hygiene, before oracle, before
 probes, or before `rv submit`. Clear a cache only after concrete evidence of corruption or a
@@ -603,9 +706,11 @@ only at natural stage boundaries and after a build failure; do not add another p
 
 - If the task has not produced a green `rv oracle` within 60 minutes, stop construction. Do not
   start probes, another oracle, another full rebuild, or further test redesign.
-- If a focused build or link is killed by OOM, allow exactly one resource-safe retry using
-  build configuration only, such as lower parallelism, serialized targets, reduced debug data,
-  or a lower-memory linker. Do not change product source to accommodate the worker.
+- If a focused build or link is killed by OOM, determine whether it was concurrent work or one
+  oversized target. For concurrent work, enter heavy-task mode and allow one serialized retry.
+  For one oversized target, redesign the hidden-test target once as described above, then retry
+  the exact final verifier command once. Build flags alone are not an adequate response when one
+  process caused the failure. Do not change product source to accommodate the worker.
 - Stop immediately if that retry also fails, remains unable to complete within the remaining
   60-minute pre-oracle budget, or would require another multi-gigabyte cache deletion and cold
   rebuild.
@@ -624,18 +729,29 @@ recovery ZIP under `/output`.
    spending time on image builds.
 3. Run `rv oracle` once and require reward 1.0. Do not run another standalone or packaged-copy
    oracle after it passes.
-4. Run the complete probe stage once so gameability, alternative-solution, and leakage start
-   together with OpenRouter GLM 5.2.
+4. In normal mode, run the complete probe stage once so gameability, alternative-solution, and
+   leakage start together with OpenRouter GLM 5.2. In heavy-task mode, run those same three initial
+   categories once each, sequentially, using the individual check commands in the probe policy.
 5. If one category reports a real finding, inspect sibling variants at the same trust boundary,
    make one class-wide correction, run the narrow focused base/gold proof, and rerun only that
    affected category once. Never rerun categories that were already clean. If the targeted
    rerun finds another gap, stop probe-driven refinement, record the unresolved finding and
    exact evidence in `validation-summary.md`, and continue to submission. Do not make a second
    correction or launch a third probe attempt in that category.
-6. Run one final `rv check` with the probe stage excluded. Resolve actionable non-reasoning
-   findings without rerunning oracle or the already-clean probe categories.
+6. Run one final `rv check` with the probe stage excluded. In heavy-task mode, do not permit
+   independent dynamic verifier trials to overlap: run the required dynamic checks individually,
+   then run the remaining non-dynamic/non-probe stages. Use the installed `rv check` help/check
+   listing for exact check names rather than guessing them. Resolve actionable non-reasoning
+   findings without rerunning oracle or the already-clean probe categories. If that resolution
+   changes production code, the gold patch, hidden tests, `config.json`, the parser, protected
+   paths, or the Docker environment, run the narrowest focused base/gold test or static check that
+   proves the changed property before submission. Documentation-only and residue cleanup changes
+   need no additional execution. Do not package a technical change made after the final check
+   without this focused validation.
 7. Run `rv submit` normally. Its deterministic gate is the final packaging check. Do not run a
-   fresh-extraction oracle or another full `rv check` afterward.
+   fresh-extraction oracle or another full `rv check` afterward. Do perform the cheap archive
+   integrity checks in the packaging section: submission success alone does not prove that the
+   vendored Git history remained readable or that an accepted P2P justification is review-safe.
 
 If a probe finding is disproved and causes no task change, do not rerun it; explain the concrete
 source, reachability, or focused-test evidence in `validation-summary.md`. Exhausting the probe
@@ -656,7 +772,7 @@ and gameability review for this draft.
 
 ## Probe policy
 
-Run all three probe categories together for the initial attempt:
+In normal mode, run all three probe categories together for the initial attempt:
 
 ```bash
 RV_PROBE_AGENT=opencode \
@@ -668,6 +784,19 @@ rv check --stage probes \
 
 This initial command starts gameability, alternative-solution, and leakage in the same probe
 stage. Review each resulting report independently.
+
+In heavy-task mode, do **not** run that combined command. Invoke each of these once, one after the
+previous command has exited, with the same agent/model/timeout/backend arguments shown below:
+
+```text
+cyberswe/probe-gameability
+cyberswe/probe-altsolve
+cyberswe/probe-leakage
+```
+
+Use the individual `rv check --check <name>` form from the targeted-rerun example. Sequential
+initial probes still count as the one initial attempt for each category; they do not expand the
+probe budget.
 
 If a real finding causes a task change, rerun only that affected category using `--check`:
 
@@ -806,8 +935,10 @@ lower scores.
 
 Realm owns the task archive format. Run `rv submit` normally from the canonical task directory
 and use the ZIP it produces without renaming, rebuilding, filtering, or manually reproducing its
-contents. Do not create temporary symlinks around Realm directories and do not pre-delete files
-that `rv submit` normally captures.
+contents. Do not create temporary symlinks around Realm's linked environment/verifier directories
+and do not pre-delete curated task files that `rv submit` normally captures. The external
+`.seaworthy/cache` link and removal of task-root authoring state described below are deliberate
+packaging hygiene, not exceptions permitting changes to Realm's task layout.
 
 In particular, `qc_artifacts/` is authored submission evidence, not disposable residue. Keep it
 in the task when `rv submit` runs. Raw `jobs/`, language build outputs, dependency caches, and
@@ -824,15 +955,61 @@ Before packaging:
   the task for `rv submit`;
 - remove build/dependency residue, task trial jobs, temporary run artifacts, and accidental
   downloaded archives;
+- keep Realm's disposable check cache outside the task tree. Before the first `rv check`, move any
+  real `.seaworthy/cache` directory under `/home/daytona/scratch/` and replace it with a symlink to
+  that external directory. Immediately before `rv submit`, verify that `.seaworthy/cache` is still
+  a symlink rather than a recreated real directory. The submitted task may contain
+  `.seaworthy/justification.yaml`, but it must not contain `.seaworthy/cache/` or its contents;
+- after all authoring checks are complete, move the task scaffold's root `.git/` and `.rv/` to a
+  named recovery directory under `/home/daytona/scratch/` before `rv submit`. These are authoring
+  state, not Realm task contents. Do not move or remove `environment/repo/.git`, which is the
+  bounded upstream history the task must ship;
+- list top-level `*.zip` files in the canonical task directory and move every stale generated,
+  recovery, or downloaded ZIP to scratch outside the task before submission. Do not blanket-delete
+  ZIP fixtures inside `environment/repo/`; they may be legitimate upstream test data;
 - scan the entire canonical task tree, not only `environment/repo/`, and remove Python bytecode
   and cache residue such as `__pycache__/`, `*.pyc`, and `*.pyo`;
 - ensure `qc_artifacts/probes/` contains no candidate diffs, superseded reports, or manually
   copied job artifacts;
 - inspect the archive file list for secrets, duplicate repositories, hidden tests in the
-  environment, upstream history, and bloat; and
-- verify the archive from a fresh extraction.
+  environment, missing or broken vendored history, and bloat; and
+- verify the archive structure and metadata from a fresh extraction without rerunning its oracle.
 
-Use `rv submit` to generate the draft archive. Do not invent a replacement packaging format.
+After `rv submit`, extract the canonical nested task ZIP to a scratch directory and perform these
+cheap mandatory checks before wrapping it:
+
+- locate the extracted `environment/repo/.git` explicitly and run:
+  ```bash
+  repo_root="$(realpath <extracted-task>/environment/repo)"
+  git --git-dir="$repo_root/.git" --work-tree="$repo_root" rev-list --count HEAD
+  ```
+  Require at least ten commits and do not use plain `git -C` here, because it can silently fall
+  back to the one-commit task scaffold;
+- run `git --git-dir=<that>/.git --work-tree=<that> fsck --connectivity-only`;
+- read the archived `tests/config.json` and confirm the expected F2P/P2P counts and exact IDs;
+- when P2P is below 100, confirm the archived `.seaworthy/justification.yaml` contains concrete
+  entries for every applicable count finding and call the shortfall out in the outer handoff; and
+- confirm the archive contains current `qc_artifacts/` and no raw jobs, caches, bytecode, build
+  outputs, credentials, task-root `.git/`, task-root `.rv/`, or `.seaworthy/cache/`; and
+- confirm `environment/repo/.git/refs/heads/rv-base` exists in the archive and that the explicit
+  `--git-dir` commands above work after extraction.
+
+If the archived nested repository is unreadable or has fewer than ten commits, the task is not a
+normal submit-capable draft even if the pre-submit working tree passed. Re-vendor it with a
+bounded non-partial history, rerun only the cheap repository/static check invalidated by that
+change, and regenerate with `rv submit`; do not rerun oracle or probes because source behavior did
+not change.
+
+Use `rv submit` to generate the draft archive, writing it outside the canonical task directory so
+an older archive can never be recursively included:
+
+```bash
+mkdir -p /home/daytona/scratch/realm-submit
+rv submit --parent-dir /home/daytona/scratch/realm-submit --yes .
+```
+
+Before wrapping the result, confirm the generated task ZIP does not contain another generated task
+or handoff ZIP. Do not invent a replacement packaging format.
 If `rv submit` refuses solely because `reasoning.txt` intentionally contains the placeholder,
 record that as the packaging blocker and preserve the otherwise complete source tree in a
 recovery handoff ZIP for the human. Never misrepresent a substantive validation failure as a
@@ -871,6 +1048,13 @@ Do not print a final response until that verification succeeds.
 
 The normal final deliverable is one outer ZIP and nothing else. Name it clearly from the instance
 ID, for example `/output/<instance-id>-draft-handoff.zip`.
+
+**`rv submit` does not create this outer handoff.** It creates only the nested
+`<instance-id>.zip`, which is an input to the handoff assembly below. A successful `rv submit`, a
+green packaged oracle, or a final-status message naming that nested ZIP is not completion. Never
+place the bare `rv submit` ZIP directly in `/output`, never leave loose notes beside it there, and
+never exit while `/output` contains the task ZIP plus separate files. Build the outer handoff in
+scratch first, verify it, then place that one finished outer ZIP in an otherwise-empty `/output`.
 
 The outer ZIP normally contains exactly three files at its root:
 
@@ -980,6 +1164,10 @@ Before packaging, mechanically validate `draft-proposal.txt`:
 - the total length is 150–220 words; and
 - no replacement headings or alternative labels are present.
 
+The older `# Repo:`, `# Task:`, `Task category:`, or `# Testing:` proposal format is invalid even
+when its content is factually correct. If the label/order/word-count gate fails, correct the draft
+before assembling the outer handoff; do not defer that correction to the human.
+
 Correct every actionable failed check before running `rv submit`, except a probe finding left
 explicitly under the bounded refinement rule above; document that finding and continue to the
 normal draft handoff.
@@ -998,6 +1186,10 @@ attempted, and that the human must review or strengthen the draft before Realm r
 
 Build the outer ZIP after the task ZIP, reasoning notes, and draft proposal are final. Require
 exactly those three files, plus the optional narrowly scoped validation summary when applicable.
+Extract the completed outer ZIP into a fresh scratch directory and require that its root contains
+only `<instance-id>.zip`, `reasoning-notes.md`, `draft-proposal.txt`, and the optional
+`validation-summary.md`. Then inspect the nested ZIP using the archive checks above. If either ZIP
+fails, repair the packaging and re-run only these cheap archive checks—not oracle or probes.
 
 ## Daytona-to-controller handoff
 
@@ -1010,6 +1202,9 @@ sandbox. Google Drive credentials and uploads are not part of this workflow.
    handoff, it verifies the required task ZIP, reasoning notes, draft proposal, optional validation
    summary, and nested `qc_artifacts/`. For a recovery handoff, it verifies the work-in-progress
    ZIP and failure summary.
+   A single normal `<instance-id>.zip` in `/output` is not a handoff, and a task ZIP plus loose
+   notes is not a handoff. Either condition must be normalized into the required outer ZIP before
+   the worker exits.
 3. The worker prints the absolute ZIP path, byte size, and SHA-256 digest in its final status.
 4. After the worker exits, the local controller confirms that exactly one ZIP exists under
    `/output` and downloads it to a configured local output directory.
@@ -1044,6 +1239,8 @@ The job is complete only when:
   correction and one targeted rerun of the affected category; if that rerun found another gap,
   no further probe loop was started and the remaining finding was documented;
 - `rv oracle` scores 1.0;
+- the exact final verifier command completes without OOM inside the standard memory limit, and
+  any measured heavy-task mode was used consistently for authoring validation;
 - no secret, build residue, Python bytecode/cache residue, candidate diff, or superseded probe
   artifact is present; and
 - the nested `rv submit` ZIP retains `qc_artifacts/` with the final probe reports;

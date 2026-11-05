@@ -18,6 +18,7 @@ const PROJECT_ROOT = path.resolve(__dirname, '..')
 const REMOTE_WORKSPACE = '/home/daytona/workspace'
 const REMOTE_OUTPUT = '/output'
 const REMOTE_FAILURE_LOG = `${REMOTE_WORKSPACE}/codex-worker-failures.jsonl`
+const REMOTE_ARCHIVE_AUDITOR = '/opt/cyberswe-agent/audit_handoff.py'
 const SANDBOX_MAX_LIFETIME_MINUTES = readPositiveIntegerEnv(
   'DAYTONA_SANDBOX_MAX_LIFETIME_MINUTES',
   240,
@@ -242,6 +243,10 @@ async function uploadJobFiles(sandbox: Sandbox, job: string): Promise<void> {
     path.join(PROJECT_ROOT, 'agent', 'index.ts'),
     '/opt/cyberswe-agent/index.ts',
   )
+  await sandbox.fs.uploadFile(
+    path.join(PROJECT_ROOT, 'scripts', 'audit_handoff.py'),
+    REMOTE_ARCHIVE_AUDITOR,
+  )
 }
 
 async function configureRvAuthentication(sandbox: Sandbox, openRouterApiKey: string): Promise<void> {
@@ -301,7 +306,7 @@ async function runCodexWorker(sandbox: Sandbox, prompt: string): Promise<void> {
 function initialWorkerPrompt(): string {
   return [
     `Read ${REMOTE_WORKSPACE}/JOB.md first.`,
-    `Then follow ${REMOTE_WORKSPACE}/AGENTS.md as the authoritative factory policy and complete the job autonomously.`,
+    `Codex has already discovered and injected ${REMOTE_WORKSPACE}/AGENTS.md as repository instructions. Follow it as the authoritative factory policy, but do not cat, sed, print, or reread that file into the conversation.`,
     `This is authorized defensive regression testing of a public advisory, performed only against a vendored open-source repository inside an isolated disposable sandbox.`,
     `Do not access live targets or real credentials.`,
     `Do not stop until exactly one verified normal draft ZIP or recovery ZIP is present under ${REMOTE_OUTPUT}. Probe-budget exhaustion requires the normal draft ZIP, not recovery. Never leave completed work only inside the disposable sandbox.`,
@@ -312,7 +317,8 @@ function recoveryWorkerPrompt(): string {
   return [
     `Continue from the existing workspace.`,
     `Do not repeat completed work.`,
-    `Read ${REMOTE_WORKSPACE}/JOB.md and ${REMOTE_WORKSPACE}/AGENTS.md, inspect the files and validation state already present, and finish the remaining work.`,
+    `Read ${REMOTE_WORKSPACE}/JOB.md, inspect the files and validation state already present, and finish the remaining work.`,
+    `Codex has already discovered and injected ${REMOTE_WORKSPACE}/AGENTS.md as repository instructions. Follow it, but do not cat, sed, print, or reread that file into the conversation.`,
     `This is local authorized patch validation of a public advisory against a vendored open-source repository in an isolated disposable sandbox.`,
     `Do not access live targets or real credentials.`,
     `Do not stop until exactly one verified normal draft ZIP or recovery ZIP is present under ${REMOTE_OUTPUT}. Probe-budget exhaustion requires the normal draft ZIP, not recovery. Never leave completed work only inside the disposable sandbox.`,
@@ -515,6 +521,44 @@ function validateArchiveEntries(entries: string[], dryRun: boolean, artifactName
   }
 }
 
+async function auditNestedTaskArchive(
+  sandbox: Sandbox,
+  remotePath: string,
+  artifactName: string,
+  dryRun: boolean,
+): Promise<void> {
+  if (dryRun || artifactName.endsWith('-recovery-handoff.zip')) return
+  const result = await executeChecked(
+    sandbox,
+    `python3 '${REMOTE_ARCHIVE_AUDITOR}' '${remotePath}'`,
+    300,
+  )
+  let parsed: {
+    status?: unknown
+    task?: unknown
+    commits?: unknown
+    fail_to_pass?: unknown
+    pass_to_pass?: unknown
+    warnings?: unknown
+  }
+  try {
+    parsed = JSON.parse(result) as typeof parsed
+  } catch {
+    throw new Error(`nested task archive audit returned invalid JSON: ${result}`)
+  }
+  if (parsed.status !== 'ok') {
+    throw new Error(`nested task archive audit did not report success: ${result}`)
+  }
+  console.log(
+    `Nested task archive verified: ${String(parsed.task)}; ` +
+      `${String(parsed.commits)} commits; ` +
+      `${String(parsed.fail_to_pass)} F2P; ${String(parsed.pass_to_pass)} P2P`,
+  )
+  if (Array.isArray(parsed.warnings)) {
+    for (const warning of parsed.warnings) console.warn(`Archive audit warning: ${String(warning)}`)
+  }
+}
+
 async function inspectRemoteArtifact(sandbox: Sandbox, dryRun: boolean): Promise<RemoteArtifact> {
   const listing = await executeChecked(
     sandbox,
@@ -532,6 +576,7 @@ async function inspectRemoteArtifact(sandbox: Sandbox, dryRun: boolean): Promise
   const entryText = await executeChecked(sandbox, `unzip -Z1 '${remotePath}'`)
   const entries = entryText.split('\n').map((entry) => entry.trim()).filter(Boolean)
   validateArchiveEntries(entries, dryRun, name)
+  await auditNestedTaskArchive(sandbox, remotePath, name, dryRun)
 
   const size = Number(sizeText)
   const sha256 = shaText.split(/\s+/)[0]
