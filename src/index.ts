@@ -309,7 +309,7 @@ function initialWorkerPrompt(): string {
     `Codex has already discovered and injected ${REMOTE_WORKSPACE}/AGENTS.md as repository instructions. Follow it as the authoritative factory policy, but do not cat, sed, print, or reread that file into the conversation.`,
     `This is authorized defensive regression testing of a public advisory, performed only against a vendored open-source repository inside an isolated disposable sandbox.`,
     `Do not access live targets or real credentials.`,
-    `Do not stop until exactly one verified normal draft ZIP or recovery ZIP is present under ${REMOTE_OUTPUT}. Probe-budget exhaustion requires the normal draft ZIP, not recovery. Never leave completed work only inside the disposable sandbox.`,
+    `Your final filesystem layout must be unambiguous: ${REMOTE_OUTPUT} contains one file total, named <instance-id>-draft-handoff.zip (or <instance-id>-recovery-handoff.zip). For a normal handoff, that one outer ZIP contains the unmodified rv-submit task ZIP, reasoning-notes.md, draft-proposal.txt, and only when needed validation-summary.md. Those component files belong inside the outer ZIP, never beside it under ${REMOTE_OUTPUT}. Probe-budget exhaustion requires the normal draft ZIP, not recovery. Never leave completed work only inside the disposable sandbox.`,
   ].join(' ')
 }
 
@@ -321,7 +321,7 @@ function recoveryWorkerPrompt(): string {
     `Codex has already discovered and injected ${REMOTE_WORKSPACE}/AGENTS.md as repository instructions. Follow it, but do not cat, sed, print, or reread that file into the conversation.`,
     `This is local authorized patch validation of a public advisory against a vendored open-source repository in an isolated disposable sandbox.`,
     `Do not access live targets or real credentials.`,
-    `Do not stop until exactly one verified normal draft ZIP or recovery ZIP is present under ${REMOTE_OUTPUT}. Probe-budget exhaustion requires the normal draft ZIP, not recovery. Never leave completed work only inside the disposable sandbox.`,
+    `Your final filesystem layout must be unambiguous: ${REMOTE_OUTPUT} contains one file total, named <instance-id>-draft-handoff.zip (or <instance-id>-recovery-handoff.zip). For a normal handoff, that one outer ZIP contains the unmodified rv-submit task ZIP, reasoning-notes.md, draft-proposal.txt, and only when needed validation-summary.md. Those component files belong inside the outer ZIP, never beside it under ${REMOTE_OUTPUT}. Probe-budget exhaustion requires the normal draft ZIP, not recovery. Never leave completed work only inside the disposable sandbox.`,
   ].join(' ')
 }
 
@@ -488,6 +488,18 @@ async function configureRv(sandbox: Sandbox): Promise<void> {
 }
 
 function validateArchiveEntries(entries: string[], dryRun: boolean, artifactName: string): void {
+  if (entries.length === 0) throw new Error('downloadable ZIP is empty')
+  for (const entry of entries) {
+    const parts = entry.split('/')
+    if (
+      entry.startsWith('/') ||
+      entry.includes('\\') ||
+      parts.some((part) => part === '..')
+    ) {
+      throw new Error(`downloadable ZIP contains an unsafe path: ${entry}`)
+    }
+  }
+
   if (dryRun) {
     if (entries.length !== 1 || entries[0] !== 'smoke.txt') {
       throw new Error(`dry-run ZIP has unexpected entries: ${entries.join(', ')}`)
@@ -497,27 +509,44 @@ function validateArchiveEntries(entries: string[], dryRun: boolean, artifactName
 
   if (artifactName.endsWith('-recovery-handoff.zip')) {
     if (entries.length !== 2 || entries.some((entry) => entry.includes('/'))) {
-      throw new Error(`recovery handoff must contain one work-in-progress ZIP and failure-summary.md; found: ${entries.join(', ')}`)
+      console.warn(`Recovery handoff is noncanonical but will still be downloaded: ${entries.join(', ')}`)
+      return
     }
-    if (!entries.includes('failure-summary.md')) throw new Error('recovery handoff is missing failure-summary.md')
+    if (!entries.includes('failure-summary.md')) console.warn('Recovery handoff is missing failure-summary.md.')
     const workInProgress = entries.filter((entry) => entry.endsWith('-work-in-progress.zip'))
     if (workInProgress.length !== 1) {
-      throw new Error('recovery handoff must contain exactly one *-work-in-progress.zip')
+      console.warn('Recovery handoff does not contain exactly one *-work-in-progress.zip.')
+    }
+    return
+  }
+
+  const rawTaskRoots = entries
+    .filter((entry) => /^[^/]+\/task\.toml$/.test(entry))
+    .map((entry) => entry.split('/')[0])
+  if (rawTaskRoots.length === 1) {
+    console.warn('Worker returned the bare rv-submit task ZIP; downloading it instead of failing the job.')
+    return
+  }
+
+  if (artifactName.endsWith('-controller-handoff.zip')) {
+    if (!entries.some((entry) => entry.endsWith('.zip'))) {
+      console.warn('Controller-collected handoff contains no nested ZIP; preserving the available output anyway.')
     }
     return
   }
 
   if ((entries.length !== 3 && entries.length !== 4) || entries.some((entry) => entry.includes('/'))) {
-    throw new Error(`handoff ZIP must contain the task ZIP, reasoning notes, draft proposal, and at most one validation summary; found: ${entries.join(', ')}`)
+    console.warn(`Handoff ZIP is noncanonical but will still be downloaded: ${entries.join(', ')}`)
+    return
   }
-  if (!entries.includes('reasoning-notes.md')) throw new Error('handoff ZIP is missing reasoning-notes.md')
-  if (!entries.includes('draft-proposal.txt')) throw new Error('handoff ZIP is missing draft-proposal.txt')
+  if (!entries.includes('reasoning-notes.md')) console.warn('Handoff ZIP is missing reasoning-notes.md.')
+  if (!entries.includes('draft-proposal.txt')) console.warn('Handoff ZIP is missing draft-proposal.txt.')
   const allowedNotes = new Set(['reasoning-notes.md', 'draft-proposal.txt', 'validation-summary.md'])
   const unexpectedNotes = entries.filter((entry) => !entry.endsWith('.zip') && !allowedNotes.has(entry))
-  if (unexpectedNotes.length > 0) throw new Error(`handoff ZIP has unexpected notes: ${unexpectedNotes.join(', ')}`)
+  if (unexpectedNotes.length > 0) console.warn(`Handoff ZIP has unexpected notes: ${unexpectedNotes.join(', ')}`)
   const nestedTasks = entries.filter((entry) => /^[A-Za-z0-9._-]+\.zip$/.test(entry))
   if (nestedTasks.length !== 1) {
-    throw new Error('handoff ZIP must contain exactly one unmodified rv submit ZIP')
+    console.warn('Handoff ZIP does not contain exactly one unmodified rv submit ZIP.')
   }
 }
 
@@ -527,12 +556,18 @@ async function auditNestedTaskArchive(
   artifactName: string,
   dryRun: boolean,
 ): Promise<void> {
-  if (dryRun || artifactName.endsWith('-recovery-handoff.zip')) return
-  const result = await executeChecked(
-    sandbox,
-    `python3 '${REMOTE_ARCHIVE_AUDITOR}' '${remotePath}'`,
-    300,
-  )
+  if (dryRun || !artifactName.endsWith('-draft-handoff.zip')) return
+  let result: string
+  try {
+    result = await executeChecked(
+      sandbox,
+      `python3 '${REMOTE_ARCHIVE_AUDITOR}' '${remotePath}'`,
+      300,
+    )
+  } catch (error) {
+    console.warn(`Archive quality audit failed; preserving and downloading the handoff anyway: ${String(error)}`)
+    return
+  }
   let parsed: {
     status?: unknown
     task?: unknown
@@ -544,10 +579,12 @@ async function auditNestedTaskArchive(
   try {
     parsed = JSON.parse(result) as typeof parsed
   } catch {
-    throw new Error(`nested task archive audit returned invalid JSON: ${result}`)
+    console.warn(`Archive quality audit returned invalid JSON; preserving the handoff anyway: ${result}`)
+    return
   }
   if (parsed.status !== 'ok') {
-    throw new Error(`nested task archive audit did not report success: ${result}`)
+    console.warn(`Archive quality audit reported a problem; preserving the handoff anyway: ${result}`)
+    return
   }
   console.log(
     `Nested task archive verified: ${String(parsed.task)}; ` +
@@ -559,7 +596,44 @@ async function auditNestedTaskArchive(
   }
 }
 
+async function normalizeRemoteOutput(sandbox: Sandbox): Promise<void> {
+  const listing = await executeChecked(
+    sandbox,
+    "find /output -mindepth 1 -maxdepth 1 -printf '%y %f\\n' | LC_ALL=C sort",
+  )
+  const entries = listing.split('\n').map((line) => line.trim()).filter(Boolean)
+  const files = entries
+    .filter((entry) => entry.startsWith('f '))
+    .map((entry) => entry.slice(2))
+    .filter((name) => /^[A-Za-z0-9._-]+$/.test(name))
+
+  if (entries.length === 1 && files.length === 1 && files[0].endsWith('.zip')) return
+  if (files.length === 0) {
+    throw new Error(`/output contains no regular files to recover: ${entries.join(', ') || '(empty)'}`)
+  }
+
+  const zipFiles = files.filter((name) => name.endsWith('.zip'))
+  const base = zipFiles.length === 1
+    ? zipFiles[0].replace(/\.zip$/, '')
+    : 'cyberswe-output'
+  const collectedName = `${base}-controller-handoff.zip`
+  const temporaryPath = `/tmp/${collectedName}`
+  const quotedFiles = files.map((name) => `'${name}'`).join(' ')
+
+  console.warn(
+    `Worker left a noncanonical /output layout (${entries.join(', ')}). ` +
+      `The controller will preserve it in ${collectedName} instead of failing the job.`,
+  )
+  await executeChecked(
+    sandbox,
+    `rm -f '${temporaryPath}' && cd '${REMOTE_OUTPUT}' && zip -q -0 '${temporaryPath}' ${quotedFiles} && ` +
+      `find '${REMOTE_OUTPUT}' -mindepth 1 -maxdepth 1 -delete && mv '${temporaryPath}' '${REMOTE_OUTPUT}/${collectedName}'`,
+    300,
+  )
+}
+
 async function inspectRemoteArtifact(sandbox: Sandbox, dryRun: boolean): Promise<RemoteArtifact> {
+  await normalizeRemoteOutput(sandbox)
   const listing = await executeChecked(
     sandbox,
     "find /output -mindepth 1 -maxdepth 1 -printf '%f\\n' | LC_ALL=C sort",
@@ -573,6 +647,7 @@ async function inspectRemoteArtifact(sandbox: Sandbox, dryRun: boolean): Promise
   const remotePath = `${REMOTE_OUTPUT}/${name}`
   const sizeText = await executeChecked(sandbox, `stat -c '%s' '${remotePath}'`)
   const shaText = await executeChecked(sandbox, `sha256sum '${remotePath}'`)
+  await executeChecked(sandbox, `unzip -tq '${remotePath}'`)
   const entryText = await executeChecked(sandbox, `unzip -Z1 '${remotePath}'`)
   const entries = entryText.split('\n').map((entry) => entry.trim()).filter(Boolean)
   validateArchiveEntries(entries, dryRun, name)

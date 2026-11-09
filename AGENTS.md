@@ -1046,6 +1046,34 @@ Before any terminal response, clear stale files from `/output`, create the appro
 list and verify its contents, compute its SHA-256, and confirm it is the only `/output` entry.
 Do not print a final response until that verification succeeds.
 
+Treat `/output` as a one-file delivery slot, not as a staging directory. At successful completion,
+this command must print exactly one line:
+
+```bash
+find /output -mindepth 1 -maxdepth 1 -printf '%f\n'
+```
+
+For a normal task, that one line is `<instance-id>-draft-handoff.zip`. The task ZIP and note
+files are inside it. They are not additional `/output` entries. In other words, the filesystem
+must look like this:
+
+```text
+/output/
+  <instance-id>-draft-handoff.zip       # the only entry in /output
+
+inside <instance-id>-draft-handoff.zip:
+  <instance-id>.zip                     # created by rv submit
+  reasoning-notes.md
+  draft-proposal.txt
+  validation-summary.md                 # optional; include only when required
+```
+
+If `/output` instead contains `<instance-id>.zip`, `draft-proposal.txt`, `HANDOFF.md`, or any
+other files side by side, packaging is not finished: move the required material into a scratch
+directory, create the outer ZIP there, empty `/output`, and then move only that outer ZIP into
+`/output`. “Exactly one ZIP” means one filesystem entry total, not one file whose extension is
+`.zip` plus other loose files.
+
 The normal final deliverable is one outer ZIP and nothing else. Name it clearly from the instance
 ID, for example `/output/<instance-id>-draft-handoff.zip`.
 
